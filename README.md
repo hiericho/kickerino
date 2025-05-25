@@ -26,7 +26,7 @@ A Python-based desktop application for viewing multiple Kick.com stream chats an
 
 1.  **Clone the repository (or download the source code):**
     ```bash
-    git clone <your-repository-url>
+    git clone https://github.com/hiericho/kickerino/
     cd kick-multi-chatter 
     ```
 
