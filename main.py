@@ -12,7 +12,6 @@ from kick_api import get_channel_info
 from kick_chat import listen_to_kick_chat
 from channel_tab import ChannelTab 
 from badge_manager import BadgeManager
-from emote_manager import EmoteManager # Import the new EmoteManager
 
 # --- Global Configuration & State ---
 GUI_UPDATE_QUEUE = asyncio.Queue()
@@ -24,14 +23,12 @@ class KickChatterApp(ctk.CTk):
     def __init__(self, loop: asyncio.AbstractEventLoop):
         super().__init__()
         self.loop = loop
-        self.aiohttp_session = None 
+        self.aiohttp_session = None
         
         self.active_channels = {}
-        # Emote cache and locks are now managed by EmoteManager
-        # Badge cache and locks are managed by BadgeManager
-        
+        self.IMAGE_CACHE = {}  
+        self.EMOTE_FETCH_LOCKS = {}
         self.badge_manager = None 
-        self.emote_manager = None # Will be initialized after session
 
         self.APP_FONT_FAMILY = "Segoe UI" 
         self.DEFAULT_FONT_SIZE = 13
@@ -39,43 +36,66 @@ class KickChatterApp(ctk.CTk):
         self.TITLE_FONT = (self.APP_FONT_FAMILY, 15, "bold")
         self.INFO_FONT = (self.APP_FONT_FAMILY, 12)
 
-        # ... (rest of __init__ as before: title, geometry, grid, input_frame, tab_view setup) ...
         self.title("Kick.com Multi-Chatter")
         self.geometry("900x750")
+
+        # --- State variable for "Always on Top" ---
+        self.always_on_top_var = ctk.BooleanVar(value=False) # Default to not pinned
+        # Apply initial state (optional, can also be set by user first)
+        # self.attributes("-topmost", self.always_on_top_var.get()) 
+        # It's often better to let the user explicitly pin it.
+
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(1, weight=1) # Tabview takes remaining space
+
+        # --- Top Input Frame ---
         self.input_frame = ctk.CTkFrame(self, corner_radius=0)
         self.input_frame.grid(row=0, column=0, padx=0, pady=0, sticky="ew")
-        self.input_frame.grid_columnconfigure(1, weight=1)
+        self.input_frame.grid_columnconfigure(1, weight=1) # Channel entry takes most space
+        # self.input_frame.grid_columnconfigure(3, weight=0) # Explicitly for checkbox if needed
+
         self.channel_label = ctk.CTkLabel(self.input_frame, text="Channel Slug(s):", font=self.DEFAULT_FONT)
-        self.channel_label.grid(row=0, column=0, padx=(10,5), pady=10)
-        self.channel_entry = ctk.CTkEntry(self.input_frame, placeholder_text="e.g., xqc, adinross (comma-separated)", font=self.DEFAULT_FONT)
+        self.channel_label.grid(row=0, column=0, padx=(10,5), pady=10, sticky="w")
+        
+        self.channel_entry = ctk.CTkEntry(self.input_frame, placeholder_text="e.g., xqc (comma-separated)", font=self.DEFAULT_FONT)
         self.channel_entry.grid(row=0, column=1, padx=5, pady=10, sticky="ew")
         self.channel_entry.bind("<Return>", self.connect_button_action)
+        
         self.connect_button = ctk.CTkButton(self.input_frame, text="Connect", command=self.connect_button_action, font=self.DEFAULT_FONT)
-        self.connect_button.grid(row=0, column=2, padx=(5,10), pady=10)
+        self.connect_button.grid(row=0, column=2, padx=(5,10), pady=10, sticky="e")
+
+        # --- "Pin to Top" Checkbox ---
+        self.pin_checkbox = ctk.CTkCheckBox(
+            self.input_frame,
+            text="Pin on Top",
+            variable=self.always_on_top_var,
+            onvalue=True,
+            offvalue=False,
+            command=self.toggle_always_on_top,
+            font=self.DEFAULT_FONT
+        )
+        self.pin_checkbox.grid(row=0, column=3, padx=(0, 10), pady=10, sticky="e")
+
+
+        # --- Tab View for Channels ---
         self.tab_view = ctk.CTkTabview(self, corner_radius=10)
         self.tab_view.grid(row=1, column=0, padx=10, pady=(5,10), sticky="nsew")
         self._initialize_info_tab()
+
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.process_gui_updates()
 
-
-    async def _ensure_session(self):
-        if not self.aiohttp_session or self.aiohttp_session.closed:
-            self.aiohttp_session = aiohttp.ClientSession()
-            print("aiohttp session initialized.")
-        
-        # Initialize Managers if they haven't been, now that session is ready
-        if not self.badge_manager and self.aiohttp_session:
-            self.badge_manager = BadgeManager(self.loop, self.aiohttp_session)
-            print("BadgeManager initialized.")
-        if not self.emote_manager and self.aiohttp_session:
-            self.emote_manager = EmoteManager(self.loop, self.aiohttp_session)
-            print("EmoteManager initialized.")
+    def toggle_always_on_top(self):
+        """Toggles the 'always on top' state of the window."""
+        is_pinned = self.always_on_top_var.get()
+        self.attributes("-topmost", is_pinned)
+        # For older Tkinter versions or if the above doesn't work:
+        # self.wm_attributes("-topmost", 1 if is_pinned else 0)
+        print(f"Window 'Always on Top' state set to: {is_pinned}")
 
 
     def _initialize_info_tab(self):
+        # ... (same as before) ...
         try:
             if "Info" not in self.tab_view._name_list:
                 self.tab_view.add("Info")
@@ -91,13 +111,23 @@ class KickChatterApp(ctk.CTk):
         except Exception as e:
             print(f"Could not initialize Info tab: {e}")
 
+    async def _ensure_session(self):
+        if not self.aiohttp_session or self.aiohttp_session.closed:
+            self.aiohttp_session = aiohttp.ClientSession()
+            print("aiohttp session initialized.")
+        if not self.badge_manager and self.aiohttp_session: # Check aiohttp_session too
+            self.badge_manager = BadgeManager(self.loop, self.aiohttp_session)
+            print("BadgeManager initialized.")
+
     async def _close_session(self):
+
         if self.aiohttp_session and not self.aiohttp_session.closed:
             await self.aiohttp_session.close()
             self.aiohttp_session = None 
             print("aiohttp session closed.")
 
     def connect_button_action(self, event=None):
+        # ... (same as before) ...
         channel_slugs_raw = self.channel_entry.get().strip()
         if not channel_slugs_raw:
             print("[SYSTEM] Please enter channel slugs.")
@@ -145,20 +175,21 @@ class KickChatterApp(ctk.CTk):
                 "tab_ref": channel_tab_ui, "info_task": None,
                 "chat_task": None, "chatroom_id": None
             }
-            channel_tab_ui.add_message_to_gui(f"[SYSTEM] Connecting to {slug}...\n", is_system=True)
+            channel_tab_ui.add_message_to_gui(f"[SYSTEM] Connecting to {slug}...\n", True)
             asyncio.run_coroutine_threadsafe(self._async_connect_channel(slug), self.loop)
         self.channel_entry.delete(0, "end")
-        
         self.loop.call_soon_threadsafe(lambda: self.connect_button.configure(state="normal", text="Connect"))
 
     async def _async_connect_channel(self, channel_slug: str):
+        # ... (same as before) ...
         try:
             await self._ensure_session() 
             if channel_slug not in self.active_channels: return
             chan_data = self.active_channels[channel_slug]
             if chan_data.get("info_task") and not chan_data["info_task"].done(): chan_data["info_task"].cancel()
             if chan_data.get("chat_task") and not chan_data["chat_task"].done(): chan_data["chat_task"].cancel()
-            assert self.aiohttp_session is not None, "aiohttp_session must not be None"
+            if not self.aiohttp_session:
+                raise RuntimeError("aiohttp_session is None when calling get_channel_info")
             info = await get_channel_info(self.aiohttp_session, channel_slug)
             if channel_slug not in self.active_channels: return
             if info.get("error"):
@@ -232,33 +263,62 @@ class KickChatterApp(ctk.CTk):
                     continue
 
                 if task_type == "stream_info_update":
-                    if tab_ui:
+                    if tab_ui is not None:
                         tab_ui.update_stream_info(payload["data"])
                 elif task_type == "stream_info_error":
-                    if tab_ui:
+                    if tab_ui is not None:
                         tab_ui.update_stream_info_error(payload["error"])
                 elif task_type == "chat_event":
                     event_detail = payload["event"]
-                    if tab_ui:
+                    if tab_ui is not None:
                         if event_detail["type"] == "chat":
                             tab_ui.display_chat_message(event_detail["data"])
                         elif event_detail["type"] == "system":
-                            tab_ui.add_message_to_gui(f"[SYSTEM] {event_detail['data']}\n", is_system=True)
+                            tab_ui.add_message_to_gui(f"[SYSTEM] {event_detail['data']}\n", "system")
                         elif event_detail["type"] == "error":
-                            tab_ui.add_message_to_gui(f"[ERROR] Chat: {event_detail['data']}\n", is_error=True)
+                            tab_ui.add_message_to_gui(f"[ERROR] Chat: {event_detail['data']}\n", "error")
                 elif task_type == "system_message":
-                    if tab_ui:
-                        tab_ui.add_message_to_gui(f"{payload['message']}\n", is_system=True)
-                elif task_type == "emote_image_loaded":
-                    pass # Handled by ChannelTab re-checking cache
-                elif task_type == "badge_image_loaded":
-                    pass # Handled by ChannelTab re-checking cache
+                    if tab_ui is not None:
+                        tab_ui.add_message_to_gui(f"{payload['message']}\n", "system")
+                elif task_type == "badge_image_loaded": 
+                    pass
                 GUI_UPDATE_QUEUE.task_done()
         except asyncio.QueueEmpty: pass 
         except Exception as e:
             print(f"Error in process_gui_updates: {e}")
             traceback.print_exc()
         finally: self.after(100, self.process_gui_updates)
+
+    async def _load_and_cache_emote(self, url: str, name: str, origin_slug: str):
+        if url in self.IMAGE_CACHE: return
+        if url not in self.EMOTE_FETCH_LOCKS: self.EMOTE_FETCH_LOCKS[url] = asyncio.Lock()
+        async with self.EMOTE_FETCH_LOCKS[url]:
+            if url in self.IMAGE_CACHE: return
+            try:
+                await self._ensure_session()
+                if not self.aiohttp_session or self.aiohttp_session.closed:
+                    print(f"Session is closed when trying to load emote {name} from {url}.")
+                    return
+                if origin_slug in self.active_channels:
+                    await self._ensure_session()
+                async with self.aiohttp_session.get(url) as response:
+                    if response.status == 200:
+                        image_data = await response.read()
+                        try:
+                            pil_image = Image.open(io.BytesIO(image_data))
+                            target_height = 24 
+                            aspect_ratio = pil_image.width / pil_image.height
+                            target_width = int(target_height * aspect_ratio)
+                            if target_width <= 0: target_width = target_height 
+                            if target_height <= 0: target_height = 24
+                            pil_image_resized = pil_image.resize((target_width, target_height), Image.Resampling.LANCZOS)
+                            tk_image = ImageTk.PhotoImage(pil_image_resized)
+                            self.IMAGE_CACHE[url] = tk_image
+                        except UnidentifiedImageError: print(f"Failed to identify image for emote {name} from {url}.")
+                        except Exception as e_pil: print(f"Pillow/Tkinter image error for emote {name} ({url}): {e_pil}")
+                    else: print(f"Failed to load emote {name} from {url}: HTTP {response.status}")
+            except aiohttp.ClientError as e_http: print(f"HTTP error loading emote {name} from {url}: {e_http}")
+            except Exception as e: print(f"Error loading/caching emote {name} ({url}): {e}")
             
     def on_closing(self):
         print("Closing application - Initiating task cancellation...")
@@ -282,7 +342,7 @@ class KickChatterApp(ctk.CTk):
         print("Tkinter window destroyed.")
 
 
-# ... (run_async_loop and if __name__ == "__main__": block remain the same as before) ...
+# ... (run_async_loop and if __name__ == "__main__": block remain the same) ...
 def run_async_loop(loop: asyncio.AbstractEventLoop):
     asyncio.set_event_loop(loop)
     try: loop.run_forever()
